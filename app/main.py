@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 import uuid
 import asyncio
+import json
 from app.scrapers import search_public_username
 from app.graph import IdentityGraphBuilder
 from app.database import SessionLocal, JobModel, get_db
@@ -72,3 +74,32 @@ async def get_results(job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+@app.get("/view/{job_id}", response_class=HTMLResponse)
+async def view_graph(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(JobModel).filter(JobModel.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    graph_data_json = json.dumps(job.graph_network.get("graph_data", {}))
+
+    html_content = f"""
+    
+    
+    
+        OSINT Identity Graph - {job_id}
+        
+        
+    
+    
+        
+            OSINT Graph Visualizer
+            Job ID: {job_id} | Seed: {job.seed_value} ({job.seed_type}) | Status: {job.status}
+        
+        
+
+        
+    
+    
+    """
+    return HTMLResponse(content=html_content)
