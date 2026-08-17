@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Dict
 import uuid
+import asyncio
+from app.scrapers import search_public_username
 
 app = FastAPI(title="Ad-Hoc OSINT Discovery Engine")
 
@@ -17,13 +19,17 @@ class DiscoveryJob(BaseModel):
 
 jobs: Dict[str, DiscoveryJob] = {}
 
-def execute_discovery(job_id: str, seed: SeedInput):
+async def execute_discovery(job_id: str, seed: SeedInput):
     results = []
     if seed.seed_type == "username":
-        results.append({"type": "profile", "platform": "GitHub", "url": f"https://github.com/{seed.seed_value}"})
+        results = await search_public_username(seed.seed_value)
+    
     jobs[job_id].discovered_nodes = results
-    jobs[job_id].confidence_score = 0.85 if results else 0.0
+    jobs[job_id].confidence_score = min(len(results) * 0.3, 1.0)
     jobs[job_id].status = "completed"
+
+def run_async_job(job_id: str, seed: SeedInput):
+    asyncio.run(execute_discovery(job_id, seed))
 
 @app.post("/api/v1/search", response_model=DiscoveryJob)
 async def start_search(seed: SeedInput, background_tasks: BackgroundTasks):
@@ -33,7 +39,7 @@ async def start_search(seed: SeedInput, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     job = DiscoveryJob(job_id=job_id, status="processing")
     jobs[job_id] = job
-    background_tasks.add_task(execute_discovery, job_id, seed)
+    background_tasks.add_task(run_async_job, job_id, seed)
     return job
 
 @app.get("/api/v1/results/{job_id}", response_model=DiscoveryJob)
