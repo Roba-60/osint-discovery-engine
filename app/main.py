@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Any
+from sqlalchemy.orm import Session
 import uuid
 import asyncio
 from app.scrapers import search_public_username
 from app.graph import IdentityGraphBuilder
+from app.database import SessionLocal, JobModel, get_db
 
 app = FastAPI(title="Ad-Hoc OSINT Discovery Engine")
 
@@ -19,37 +21,54 @@ class DiscoveryJob(BaseModel):
     graph_network: Dict[str, Any] = {}
     confidence_score: float = 0.0
 
-jobs: Dict[str, DiscoveryJob] = {}
+    class Config:
+        from_attributes = True
 
-async def execute_discovery(job_id: str, seed: SeedInput):
+async def execute_discovery(job_id: str, seed_type: str, seed_value: str):
     results = []
-    if seed.seed_type == "username":
-        results = await search_public_username(seed.seed_value)
+    if seed_type == "username":
+        results = await search_public_username(seed_value)
     
     graph_builder = IdentityGraphBuilder()
-    graph_summary = graph_builder.build_identity_network(seed.seed_type, seed.seed_value, results)
+    graph_summary = graph_builder.build_identity_network(seed_type, seed_value, results)
 
-    jobs[job_id].discovered_nodes = results
-    jobs[job_id].graph_network = graph_summary
-    jobs[job_id].confidence_score = min(len(results) * 0.3, 1.0)
-    jobs[job_id].status = "completed"
+    db = SessionLocal()
+    try:
+        job = db.query(JobModel).filter(JobModel.job_id == job_id).first()
+        if job:
+            job.discovered_nodes = results
+            job.graph_network = graph_summary
+            job.confidence_score = min(len(results) * 0.3, 1.0)
+            job.status = "completed"
+            db.commit()
+    finally:
+        db.close()
 
-def run_async_job(job_id: str, seed: SeedInput):
-    asyncio.run(execute_discovery(job_id, seed))
+def run_async_job(job_id: str, seed_type: str, seed_value: str):
+    asyncio.run(execute_discovery(job_id, seed_type, seed_value))
 
 @app.post("/api/v1/search", response_model=DiscoveryJob)
-async def start_search(seed: SeedInput, background_tasks: BackgroundTasks):
+async def start_search(seed: SeedInput, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if seed.seed_type not in ["username", "email", "image_url"]:
         raise HTTPException(status_code=400, detail="Invalid seed type")
     
     job_id = str(uuid.uuid4())
-    job = DiscoveryJob(job_id=job_id, status="processing")
-    jobs[job_id] = job
-    background_tasks.add_task(run_async_job, job_id, seed)
-    return job
+    db_job = JobModel(
+        job_id=job_id,
+        seed_type=seed.seed_type,
+        seed_value=seed.seed_value,
+        status="processing"
+    )
+    db.add(db_job)
+    db.commit()
+    db.refresh(db_job)
+
+    background_tasks.add_task(run_async_job, job_id, seed.seed_type, seed.seed_value)
+    return db_job
 
 @app.get("/api/v1/results/{job_id}", response_model=DiscoveryJob)
-async def get_results(job_id: str):
-    if job_id not in jobs:
+async def get_results(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(JobModel).filter(JobModel.job_id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return jobs[job_id]
+    return job
